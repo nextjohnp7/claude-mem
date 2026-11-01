@@ -192,18 +192,35 @@ export class BackupManager {
   async applyRetention(): Promise<void> {
     const names = this.listSnapshotNames();
     const excess = names.slice(this.retainCount);
+    let deleted = 0;
+    let failed = 0;
     for (const name of excess) {
       const snapshotPath = join(this.backupsDir, name);
-      unlinkSync(snapshotPath);
-      for (const sidecar of [`${snapshotPath}-wal`, `${snapshotPath}-shm`]) {
-        if (existsSync(sidecar)) unlinkSync(sidecar);
+      try {
+        unlinkSync(snapshotPath);
+      } catch (err: unknown) {
+        // One locked/unremovable snapshot (a reader holds it, Windows file
+        // locking) must not abort the whole pass — prune the rest and retry
+        // this one on the next run.
+        failed++;
+        logger.warn('BACKUP', 'Retention could not delete a snapshot; will retry next run', { snapshotPath }, err instanceof Error ? err : new Error(String(err)));
+        continue;
       }
+      for (const sidecar of [`${snapshotPath}-wal`, `${snapshotPath}-shm`]) {
+        try {
+          if (existsSync(sidecar)) unlinkSync(sidecar);
+        } catch { /* an orphaned sidecar is harmless and tiny */ }
+      }
+      deleted++;
     }
-    if (excess.length > 0) {
+    if (deleted > 0) {
       logger.info('BACKUP', 'Retention pruned old snapshots', {
-        deleted: excess.length,
-        retained: names.length - excess.length,
+        deleted,
+        retained: names.length - deleted,
       });
+    }
+    if (failed > 0) {
+      this.lastError = `retention could not delete ${failed} old snapshot(s); will retry next run`;
     }
   }
 

@@ -222,6 +222,49 @@ describe('BackupManager.applyRetention', () => {
 
     expect(readdirSync(backupsDir)).toEqual(['claude-mem-2026-08-24T00-00-00-000Z.db']);
   });
+
+  it('keeps pruning the rest when one old snapshot cannot be deleted, and reports it in lastError', async () => {
+    tempRoot = mkdtempSync(join(tmpdir(), 'claude-mem-backup-'));
+    createSourceDb(tempRoot);
+    const backupsDir = join(tempRoot, 'backups', 'auto');
+    mkdirSync(backupsDir, { recursive: true });
+
+    // The oldest entry is a directory: unlinkSync on a directory fails on
+    // every platform, standing in for a locked/undeletable snapshot file.
+    mkdirSync(join(backupsDir, 'claude-mem-2026-08-20T00-00-00-000Z.db'));
+    writeFileSync(join(backupsDir, 'claude-mem-2026-08-21T00-00-00-000Z.db'), 'snapshot');
+    writeFileSync(join(backupsDir, 'claude-mem-2026-08-22T00-00-00-000Z.db'), 'snapshot');
+
+    const manager = makeManager(tempRoot, { CLAUDE_MEM_BACKUP_RETAIN_COUNT: '1' });
+    await manager.applyRetention();
+
+    expect(readdirSync(backupsDir).sort()).toEqual([
+      'claude-mem-2026-08-20T00-00-00-000Z.db',
+      'claude-mem-2026-08-22T00-00-00-000Z.db',
+    ]);
+    expect(manager.status().lastError).not.toBeNull();
+  });
+
+  it('falls back to retaining 7 when CLAUDE_MEM_BACKUP_RETAIN_COUNT is missing or invalid', async () => {
+    for (const setting of [undefined, 'abc', '0', '-3']) {
+      tempRoot = mkdtempSync(join(tmpdir(), 'claude-mem-backup-'));
+      createSourceDb(tempRoot);
+      const backupsDir = join(tempRoot, 'backups', 'auto');
+      mkdirSync(backupsDir, { recursive: true });
+      for (let day = 1; day <= 9; day++) {
+        const stamp = `2026-08-${String(day).padStart(2, '0')}T00-00-00-000Z`;
+        writeFileSync(join(backupsDir, `claude-mem-${stamp}.db`), 'snapshot');
+      }
+
+      const settings: Record<string, string> = {};
+      if (setting !== undefined) settings.CLAUDE_MEM_BACKUP_RETAIN_COUNT = setting;
+      await makeManager(tempRoot, settings).applyRetention();
+
+      expect(readdirSync(backupsDir)).toHaveLength(7);
+      rmSync(tempRoot, { recursive: true, force: true });
+      tempRoot = undefined;
+    }
+  });
 });
 
 describe('DatabaseManager backup gate', () => {
