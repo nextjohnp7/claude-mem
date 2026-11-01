@@ -148,6 +148,23 @@ describe('BackupManager.createSnapshot standalone output', () => {
   });
 });
 
+describe('BackupManager.runNow', () => {
+  it('is single-flight: a concurrent call returns null instead of stacking a second cycle', async () => {
+    tempRoot = mkdtempSync(join(tmpdir(), 'claude-mem-backup-'));
+    createSourceDb(tempRoot);
+    const manager = makeManager(tempRoot);
+
+    const [first, second] = await Promise.all([manager.runNow(), manager.runNow()]);
+
+    const results = [first, second];
+    expect(results.filter(r => r === null)).toHaveLength(1);
+    const completed = results.find(r => r !== null);
+    expect(completed).toBeDefined();
+    expect(existsSync(completed!.path)).toBe(true);
+    expect(manager.status().snapshotCount).toBe(1);
+  });
+});
+
 describe('BackupManager.createSnapshot off the event loop', () => {
   it('lets the worker run timers while a snapshot is in progress', async () => {
     tempRoot = mkdtempSync(join(tmpdir(), 'claude-mem-backup-'));
@@ -311,6 +328,22 @@ describe('DatabaseManager backup gate', () => {
     } finally {
       await dbManager.close();
       restoreSettings();
+    }
+  });
+
+  it('stays disabled for unset or non-exact-true values (the gate is === "true")', async () => {
+    for (const value of [undefined, 'TRUE', '1', 'yes']) {
+      const settings: Record<string, string> = { CLAUDE_MEM_CHROMA_ENABLED: 'false' };
+      if (value !== undefined) settings.CLAUDE_MEM_BACKUP_ENABLED = value;
+      writeFileSync(USER_SETTINGS_PATH, JSON.stringify(settings));
+      const dbManager = new DatabaseManager();
+      await dbManager.initialize();
+      try {
+        expect(dbManager.getBackupManager()).toBeNull();
+      } finally {
+        await dbManager.close();
+        restoreSettings();
+      }
     }
   });
 });
