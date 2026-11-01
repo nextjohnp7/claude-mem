@@ -122,7 +122,17 @@ export class BackupManager {
    */
   status(): BackupStatus {
     const names = this.listSnapshotNames();
-    const newest = names[0] ? statSync(join(this.backupsDir, names[0])) : null;
+    // The newest snapshot can disappear between readdir and stat (a
+    // concurrent retention pass, a restore swap, a manual delete) — report
+    // it as absent instead of throwing out of a read-only status call.
+    let newest: { mtimeMs: number; size: number } | null = null;
+    if (names[0]) {
+      try {
+        newest = statSync(join(this.backupsDir, names[0]));
+      } catch {
+        newest = null;
+      }
+    }
     return {
       configured: true,
       lastSnapshotAt: newest ? newest.mtimeMs : null,
