@@ -158,8 +158,12 @@ export class BackupManager {
       renameSync(partialPath, backupPath);
     } catch (err: unknown) {
       const error = err instanceof Error ? err : new Error(String(err));
-      for (const leftover of [partialPath, `${partialPath}-wal`, `${partialPath}-shm`]) {
-        if (existsSync(leftover)) unlinkSync(leftover);
+      // Best-effort cleanup: a leftover still locked by the dying child (the
+      // norm on Windows) must not mask the original snapshot error.
+      for (const leftover of [partialPath, `${partialPath}-wal`, `${partialPath}-shm`, `${partialPath}-journal`]) {
+        try {
+          if (existsSync(leftover)) unlinkSync(leftover);
+        } catch { /* leave it; removePartialSnapshots retries on the next run */ }
       }
       logger.error('BACKUP', 'Snapshot failed; no snapshot was kept', { backupPath }, error);
       throw error;

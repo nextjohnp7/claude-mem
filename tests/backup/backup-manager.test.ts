@@ -129,6 +129,23 @@ describe('BackupManager.createSnapshot standalone output', () => {
     expect(readdirSync(backupsDir).filter(name => name.endsWith('.partial'))).toEqual([]);
     expect(manager.status().snapshotCount).toBe(1);
   });
+
+  it('clears every partial sidecar variant (-wal, -shm, -journal) left by an interrupted run', async () => {
+    tempRoot = mkdtempSync(join(tmpdir(), 'claude-mem-backup-'));
+    createSourceDb(tempRoot);
+    const backupsDir = join(tempRoot, 'backups', 'auto');
+    mkdirSync(backupsDir, { recursive: true });
+    for (const suffix of ['', '-wal', '-shm', '-journal']) {
+      writeFileSync(join(backupsDir, `claude-mem-2026-10-01T00-00-00-000Z.db.partial${suffix}`), 'half written');
+    }
+    const manager = makeManager(tempRoot);
+    expect(manager.status().snapshotCount).toBe(0);
+
+    await manager.createSnapshot();
+
+    expect(readdirSync(backupsDir).filter(name => name.includes('.partial'))).toEqual([]);
+    expect(manager.status().snapshotCount).toBe(1);
+  });
 });
 
 describe('BackupManager.createSnapshot off the event loop', () => {
