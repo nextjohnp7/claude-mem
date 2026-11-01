@@ -2,9 +2,9 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { join, resolve } from 'path';
 import { applyPendingRestore } from '../../src/services/backup/restore-swap.js';
-import { readLastRestoreResult, resolveSnapshotInside, stagePendingRestore } from '../../src/services/backup/snapshot-files.js';
+import { readLastRestoreResult, readPendingRestore, resolveSnapshotInside, stagePendingRestore } from '../../src/services/backup/snapshot-files.js';
 import { paths } from '../../src/shared/paths.js';
 import { ChromaSyncState } from '../../src/services/sync/ChromaSyncState.js';
 
@@ -47,8 +47,10 @@ function setup(): { dbPath: string; backupsDir: string; snapshotName: string } {
 
 describe('resolveSnapshotInside', () => {
   it('accepts a snapshot name inside the backups dir', () => {
+    // path.resolve (not join): on Windows it also anchors the current drive,
+    // matching what resolveSnapshotInside returns.
     expect(resolveSnapshotInside('/data/backups/auto', 'claude-mem-2026-10-01T00-00-00-000Z.db'))
-      .toBe(join('/data/backups/auto', 'claude-mem-2026-10-01T00-00-00-000Z.db'));
+      .toBe(resolve('/data/backups/auto', 'claude-mem-2026-10-01T00-00-00-000Z.db'));
   });
 
   it('rejects traversal, absolute paths, nested paths and non-snapshot names', () => {
@@ -56,6 +58,32 @@ describe('resolveSnapshotInside', () => {
     expect(resolveSnapshotInside('/data/backups/auto', '/etc/claude-mem-x.db')).toBeNull();
     expect(resolveSnapshotInside('/data/backups/auto', 'nested/claude-mem-x.db')).toBeNull();
     expect(resolveSnapshotInside('/data/backups/auto', 'notes.txt')).toBeNull();
+  });
+
+  it('rejects Windows-style traversal, drive-absolute paths and snapshot sidecar names', () => {
+    expect(resolveSnapshotInside('/data/backups/auto', '..\\..\\claude-mem-x.db')).toBeNull();
+    expect(resolveSnapshotInside('C:\\data\\backups\\auto', 'C:\\elsewhere\\claude-mem-x.db')).toBeNull();
+    expect(resolveSnapshotInside('/data/backups/auto', 'claude-mem-2026-10-01T00-00-00-000Z.db-wal')).toBeNull();
+    expect(resolveSnapshotInside('/data/backups/auto', 'claude-mem-2026-10-01T00-00-00-000Z.db.partial')).toBeNull();
+  });
+});
+
+describe('restore marker files', () => {
+  it('stages and reads back a marker with its snapshot name and request time', () => {
+    mkdirSync(join(paths.pendingRestore(), '..'), { recursive: true });
+    stagePendingRestore('claude-mem-2026-10-01T00-00-00-000Z.db');
+
+    const pending = readPendingRestore();
+
+    expect(pending?.snapshot).toBe('claude-mem-2026-10-01T00-00-00-000Z.db');
+    expect(pending?.requestedAt).toBeGreaterThan(0);
+  });
+
+  it('throws for a well-formed marker that has no snapshot name', () => {
+    mkdirSync(join(paths.pendingRestore(), '..'), { recursive: true });
+    writeFileSync(paths.pendingRestore(), '{}');
+
+    expect(() => readPendingRestore()).toThrow('no snapshot name');
   });
 });
 
@@ -162,5 +190,22 @@ describe('applyPendingRestore', () => {
     // The failure was recorded, and the next boot finds nothing to retry.
     expect(readLastRestoreResult()?.error).toContain('boom mid-swap');
     expect(await applyPendingRestore(dbPath, backupsDir)).toBeNull();
+  });
+
+  it('restores into a data dir that has no live database yet', async () => {
+    tempRoot = mkdtempSync(join(tmpdir(), 'pending-restore-test-'));
+    const backupsDir = join(tempRoot, 'backups', 'auto');
+    mkdirSync(backupsDir, { recursive: true });
+    const dbPath = join(tempRoot, 'claude-mem.db'); // deliberately not created
+    const snapshotName = 'claude-mem-2026-10-01T00-00-00-000Z.db';
+    makeDb(join(backupsDir, snapshotName), 'snapshot');
+    stagePendingRestore(snapshotName);
+
+    const result = await applyPendingRestore(dbPath, backupsDir);
+
+    expect(result?.ok).toBe(true);
+    expect(result?.preRestoreCopy).toBeNull();
+    expect(readNote(dbPath)).toBe('snapshot');
+    expect(existsSync(paths.pendingRestore())).toBe(false);
   });
 });
