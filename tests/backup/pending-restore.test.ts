@@ -128,4 +128,39 @@ describe('applyPendingRestore', () => {
     expect(existsSync(paths.pendingRestore())).toBe(false);
     expect(readNote(dbPath)).toBe('live');
   });
+
+  it('keeps the marker in place until the swap has succeeded (crash-safe ordering)', async () => {
+    const { dbPath, backupsDir, snapshotName } = setup();
+    stagePendingRestore(snapshotName);
+
+    let markerPresentDuringSwap: boolean | null = null;
+    const result = await applyPendingRestore(dbPath, backupsDir, {
+      swap: async () => {
+        markerPresentDuringSwap = existsSync(paths.pendingRestore());
+        // No real swap: this test only pins the ordering, the live db stays.
+        return { preRestoreCopy: null };
+      },
+    });
+
+    expect(result?.ok).toBe(true);
+    expect(markerPresentDuringSwap).toBe(true);
+    expect(existsSync(paths.pendingRestore())).toBe(false);
+  });
+
+  it('clears the marker and records the failure when the swap itself fails', async () => {
+    const { dbPath, backupsDir, snapshotName } = setup();
+    stagePendingRestore(snapshotName);
+
+    const result = await applyPendingRestore(dbPath, backupsDir, {
+      swap: async () => { throw new Error('boom mid-swap'); },
+    });
+
+    expect(result?.ok).toBe(false);
+    expect(result?.error).toContain('boom mid-swap');
+    expect(existsSync(paths.pendingRestore())).toBe(false);
+    expect(readNote(dbPath)).toBe('live');
+    // The failure was recorded, and the next boot finds nothing to retry.
+    expect(readLastRestoreResult()?.error).toContain('boom mid-swap');
+    expect(await applyPendingRestore(dbPath, backupsDir)).toBeNull();
+  });
 });

@@ -261,15 +261,16 @@ function queueSemanticIndexRebuild(): void {
 
 /**
  * Apply a restore staged by `npx claude-mem restore`, before anything in
- * this process opens the database. The marker is cleared as soon as it is
- * read, so a restore that fails is reported once and never retried on every
- * boot. The outcome goes to last-restore.json, which GET /api/backup/status
+ * this process opens the database. The marker survives until the swap has
+ * succeeded, so a crash mid-restore is retried on the next boot; a restore
+ * that fails is reported once and never retried on every boot. The outcome
+ * goes to last-restore.json, which GET /api/backup/status
  * reports. Never throws.
  */
 export async function applyPendingRestore(
   dbPath: string,
   backupsDir: string,
-  options: { busyRetryWindowMs?: number } = {},
+  options: { busyRetryWindowMs?: number; swap?: typeof swapDatabaseFromSnapshot } = {},
 ): Promise<LastRestoreResult | null> {
   let snapshot = '(unreadable restore marker)';
   let result: LastRestoreResult;
@@ -277,15 +278,20 @@ export async function applyPendingRestore(
     const pending = readPendingRestore();
     if (pending === null) return null;
     snapshot = pending.snapshot;
-    clearPendingRestore();
     const snapshotPath = resolveSnapshotInside(backupsDir, pending.snapshot);
     if (snapshotPath === null) {
       throw new Error(`refusing a restore target outside the backups directory: ${pending.snapshot}`);
     }
-    const { preRestoreCopy } = await swapDatabaseFromSnapshot(dbPath, snapshotPath, {
+    const { preRestoreCopy } = await (options.swap ?? swapDatabaseFromSnapshot)(dbPath, snapshotPath, {
       preRestoreDir: backupsDir,
       busyRetryWindowMs: options.busyRetryWindowMs,
     });
+    // Cleared only after the swap succeeded: a crash mid-swap leaves the
+    // marker in place, so the next boot retries (or finishes) the restore
+    // instead of booting with no record and the live sidecars parked at
+    // their staging names. The failure path below still clears it, so a
+    // failing restore is reported once and never retried on every boot.
+    clearPendingRestore();
     result = { snapshot, at: Date.now(), ok: true, preRestoreCopy, error: null };
     logger.info('BACKUP', 'Pending restore applied', { snapshot, preRestoreCopy });
     queueSemanticIndexRebuild();
